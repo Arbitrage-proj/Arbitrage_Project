@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import asyncio
 import ccxt
 import logging
+import os  # <-- Added
 import time
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -16,14 +17,16 @@ EXCHANGES = {
     'binance': ccxt.binance({'enableRateLimit': True}),
     'kraken': ccxt.kraken({'enableRateLimit': True}),
     'bybit': ccxt.bybit({
-        'apiKey': 'UAd64VLKcN5fbMGRa7',
-        'secret': 'iggbSXgt0AkiN8TzGO2wx7SQxShFfOjlUxvh',
+        'apiKey': os.environ.get("BYBIT_API_KEY"),
+        'secret': os.environ.get("BYBIT_API_SECRET"),
         'enableRateLimit': True
     }),
-    'okx': ccxt.okx({'enableRateLimit': True}),
-    'bingx': ccxt.bingx({
+    'okx': ccxt.okx({
+        'apiKey': os.environ.get("OKX_API_KEY"),
+        'secret': os.environ.get("OKX_API_SECRET"),
         'enableRateLimit': True
     }),
+    'bingx': ccxt.bingx({'enableRateLimit': True}),
     'kucoin': ccxt.kucoin({'enableRateLimit': True}),
 }
 
@@ -141,7 +144,7 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Error during scan. Please try again later.")
 
 def main():
-    TOKEN = '7985058577:AAGivbOTIArZdzWAYaO-Q1AduYlRPGT2ldQ'  # Hardcoded token
+    TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")  # <-- load token from env
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("scan", scan_command))
     logger.info("Bot is running...")
