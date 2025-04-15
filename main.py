@@ -15,9 +15,15 @@ logger = logging.getLogger(__name__)
 EXCHANGES = {
     'binance': ccxt.binance({'enableRateLimit': True}),
     'kraken': ccxt.kraken({'enableRateLimit': True}),
-    'bybit': ccxt.bybit({'enableRateLimit': True}),
+    'bybit': ccxt.bybit({
+        'apiKey': 'UAd64VLKcN5fbMGRa7',
+        'secret': 'iggbSXgt0AkiN8TzGO2wx7SQxShFfOjlUxvh',
+        'enableRateLimit': True
+    }),
     'okx': ccxt.okx({'enableRateLimit': True}),
-    'bingx': ccxt.bingx({'enableRateLimit': True}),
+    'bingx': ccxt.bingx({
+        'enableRateLimit': True
+    }),
     'kucoin': ccxt.kucoin({'enableRateLimit': True}),
 }
 
@@ -30,17 +36,15 @@ DEFAULT_FEES = {
     'kucoin': 0.1,
 }
 
-
 def get_trading_fee(exchange_id: str, exchange: ccxt.Exchange) -> float:
     try:
-        if hasattr(exchange, 'fetch_trading_fees'):
+        if 'fetchTradingFees' in exchange.has and exchange.has['fetchTradingFees']:
             fees = exchange.fetch_trading_fees()
             return fees.get('taker', DEFAULT_FEES.get(exchange_id, 0.1))
         return DEFAULT_FEES.get(exchange_id, 0.1)
     except Exception as e:
         logger.error(f"Fee error for {exchange_id}: {e}")
         return DEFAULT_FEES.get(exchange_id, 0.1)
-
 
 def fetch_exchange_tokens() -> dict:
     tokens = {}
@@ -51,7 +55,6 @@ def fetch_exchange_tokens() -> dict:
         except Exception as e:
             logger.error(f"Market load failed for {exchange_id}: {e}")
     return tokens
-
 
 def get_market_prices(token: str) -> dict:
     prices = {}
@@ -66,9 +69,8 @@ def get_market_prices(token: str) -> dict:
                 logger.warning(f"Price fetch failed for {token} on {ex_id}: {e}")
     return prices
 
-
 def analyze_arbitrage(prices: dict, token: str, fees: dict) -> dict:
-    if len(prices) < 2:
+    if len(prices) < 0.3:
         return None
 
     sorted_exchanges = sorted(prices.items(), key=lambda x: x[1])
@@ -82,7 +84,7 @@ def analyze_arbitrage(prices: dict, token: str, fees: dict) -> dict:
     sell_total = sell_price * (1 - sell_fee / 100)
     profit_pct = ((sell_total - buy_total) / buy_total) * 100
 
-    if profit_pct > 0.1:
+    if profit_pct > 1:
         return {
             'token': token,
             'buy_exchange': buy_ex,
@@ -92,7 +94,6 @@ def analyze_arbitrage(prices: dict, token: str, fees: dict) -> dict:
             'profit': round(profit_pct, 2)
         }
     return None
-
 
 def find_opportunities() -> list:
     logger.info("Starting arbitrage scan...")
@@ -112,7 +113,6 @@ def find_opportunities() -> list:
 
     return sorted(opportunities, key=lambda x: x['profit'], reverse=True)
 
-
 def format_opportunities(opportunities: list) -> str:
     if not opportunities:
         return "🔍 No profitable arbitrage opportunities found currently."
@@ -129,7 +129,6 @@ def format_opportunities(opportunities: list) -> str:
 
     return "\n".join(message)
 
-
 async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔄 Scanning exchanges... (This may take 20-30 seconds)")
     try:
@@ -141,14 +140,12 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Scan failed: {e}")
         await update.message.reply_text("⚠️ Error during scan. Please try again later.")
 
-
 def main():
-    TOKEN = "7985058577:AAElBD7nNAKHdTWMOBYEGP0TM-P3FNxfD1w"
+    TOKEN = '7985058577:AAGivbOTIArZdzWAYaO-Q1AduYlRPGT2ldQ'  # Hardcoded token
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("scan", scan_command))
     logger.info("Bot is running...")
     application.run_polling()
-
 
 if __name__ == '__main__':
     main()
