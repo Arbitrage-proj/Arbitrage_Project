@@ -5,6 +5,7 @@ import logging
 import os
 import time
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # Configure logging
@@ -15,7 +16,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration
-MIN_PROFIT_THRESHOLD = 1.0 
+MIN_PROFIT_THRESHOLD = 1.0
 MAX_TOKENS_TO_SCAN = 20
 REQUEST_TIMEOUT = 10
 
@@ -48,7 +49,6 @@ DEFAULT_FEES = {
 }
 
 def check_exchange_status(exchange_id: str, exchange: ccxt.Exchange) -> bool:
-    """Check if an exchange is operational."""
     try:
         exchange.load_markets()
         return True
@@ -57,7 +57,6 @@ def check_exchange_status(exchange_id: str, exchange: ccxt.Exchange) -> bool:
         return False
 
 def get_trading_fee(exchange_id: str, exchange: ccxt.Exchange) -> float:
-    """Get trading fee for an exchange."""
     try:
         if 'fetchTradingFees' in exchange.has and exchange.has['fetchTradingFees']:
             fees = exchange.fetch_trading_fees()
@@ -67,11 +66,10 @@ def get_trading_fee(exchange_id: str, exchange: ccxt.Exchange) -> float:
         logger.error(f"Fee error for {exchange_id}: {e}")
         return DEFAULT_FEES.get(exchange_id, 0.1)
 
-def fetch_exchange_tokens() -> dict:
-    """Fetch available tokens from all exchanges."""
+def fetch_exchange_tokens(operational_exchanges: dict) -> dict:
     tokens = {}
     with ThreadPoolExecutor() as executor:
-        futures = {executor.submit(ex.load_markets): ex_id for ex_id, ex in EXCHANGES.items()}
+        futures = {executor.submit(ex.load_markets): ex_id for ex_id, ex in operational_exchanges.items()}
         for future in as_completed(futures):
             ex_id = futures[future]
             try:
@@ -82,11 +80,10 @@ def fetch_exchange_tokens() -> dict:
                 logger.error(f"Market load failed for {ex_id}: {e}")
     return tokens
 
-def get_market_prices(token: str) -> dict:
-    """Fetch prices for a token from all exchanges in parallel."""
+def get_market_prices(token: str, exchanges: dict) -> dict:
     prices = {}
     with ThreadPoolExecutor() as executor:
-        futures = {executor.submit(ex.fetch_ticker, token): ex_id for ex_id, ex in EXCHANGES.items()}
+        futures = {executor.submit(ex.fetch_ticker, token): ex_id for ex_id, ex in exchanges.items()}
         for future in as_completed(futures):
             ex_id = futures[future]
             try:
@@ -99,8 +96,7 @@ def get_market_prices(token: str) -> dict:
     return prices
 
 def analyze_arbitrage(prices: dict, token: str, fees: dict) -> dict:
-    """Analyze arbitrage opportunities for a token."""
-    if len(prices) < 2:  # Need at least 2 valid prices
+    if len(prices) < 2:
         return None
 
     sorted_exchanges = sorted(prices.items(), key=lambda x: x[1])
@@ -122,38 +118,39 @@ def analyze_arbitrage(prices: dict, token: str, fees: dict) -> dict:
             'buy_price': round(buy_price, 4),
             'sell_price': round(sell_price, 4),
             'profit': round(profit_pct, 2),
-            'volume': round((sell_price - buy_price) * 1000, 2)  # Volume for $1000 trade
+            'volume': round((sell_price - buy_price) * 1000, 2)
         }
     return None
 
 def find_opportunities() -> list:
-    """Find arbitrage opportunities across all exchanges."""
     logger.info("Starting arbitrage scan...")
-    
-    # Check exchange status
-    operational_exchanges = {ex_id: ex for ex_id, ex in EXCHANGES.items() 
-                           if check_exchange_status(ex_id, ex)}
-    
+
+    operational_exchanges = {ex_id: ex for ex_id, ex in EXCHANGES.items()
+                             if check_exchange_status(ex_id, ex)}
+
     if not operational_exchanges:
         logger.error("No operational exchanges found")
         return []
 
-    tokens = fetch_exchange_tokens()
-    common_tokens = set.intersection(*[set(tokens[ex]) for ex in operational_exchanges if ex in tokens])
+    tokens = fetch_exchange_tokens(operational_exchanges)
+    valid_tokens = [set(tokens[ex]) for ex in operational_exchanges if ex in tokens]
+    if not valid_tokens:
+        return []
+
+    common_tokens = set.intersection(*valid_tokens)
     fees = {ex_id: get_trading_fee(ex_id, ex) for ex_id, ex in operational_exchanges.items()}
 
     opportunities = []
     for token in list(common_tokens)[:MAX_TOKENS_TO_SCAN]:
-        prices = get_market_prices(token)
+        prices = get_market_prices(token, operational_exchanges)
         result = analyze_arbitrage(prices, token, fees)
         if result:
             opportunities.append(result)
-        time.sleep(0.5)  # Rate limiting
+        time.sleep(0.5)
 
     return sorted(opportunities, key=lambda x: x['profit'], reverse=True)
 
 def format_opportunities(opportunities: list) -> str:
-    """Format arbitrage opportunities into a readable message."""
     if not opportunities:
         return "🔍 No profitable arbitrage opportunities found currently."
 
@@ -167,23 +164,20 @@ def format_opportunities(opportunities: list) -> str:
             f"   📊 Volume: ${opp['volume']} (per $1000)\n"
             f"   ――――――――――――――――――――"
         )
-
     return "\n".join(message)
 
 async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the /scan command."""
-    await update.message.reply_text("🔄 Scanning exchanges... (This may take 20-30 seconds)")
+    await update.message.reply_text("🔄 Scanning exchanges... (This may take 20–30 seconds)")
     try:
         loop = asyncio.get_running_loop()
         opportunities = await loop.run_in_executor(None, find_opportunities)
         response = format_opportunities(opportunities)
-        await update.message.reply_text(response, parse_mode='Markdown')
+        await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"Scan failed: {e}")
         await update.message.reply_text("⚠️ Error during scan. Please try again later.")
 
 def main():
-    """Start the Telegram bot."""
     TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN not found in environment variables")
