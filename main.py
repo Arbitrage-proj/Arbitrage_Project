@@ -1,154 +1,107 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import asyncio
-import ccxt
-import logging
-import os  # <-- Added
-import time
-from telegram import Update, ReplyKeyboardMarkup
+import requests
+import os
+from binance.client import Client as BinanceClient
+from pybit.unified_trading import HTTP as BybitClient
+from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+import ccxt
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# ===== API Keys =====
+BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
+BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET")
+BYBIT_API_KEY = os.environ.get("BYBIT_API_KEY")
+BYBIT_SECRET = os.environ.get("BYBIT_API_SECRET")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
-EXCHANGES = {
-    'binance': ccxt.binance({'enableRateLimit': True}),
-    'kraken': ccxt.kraken({'enableRateLimit': True}),
-    'bybit': ccxt.bybit({
-        'apiKey': os.environ.get("BYBIT_API_KEY"),
-        'secret': os.environ.get("BYBIT_API_SECRET"),
+# ===== Инициализация клиентов =====
+binance_client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET)
+bybit_client = BybitClient(api_key=BYBIT_API_KEY, api_secret=BYBIT_SECRET)
+
+# ===== Порог прибыли =====
+THRESHOLD = 0
+
+# ===== Получение общих торговых пар =====
+def fetch_common_tokens():
+    binance = ccxt.binance({"enableRateLimit": True})
+    bybit = ccxt.bybit({
+        'apiKey': BYBIT_API_KEY,
+        'secret': BYBIT_SECRET,
         'enableRateLimit': True
-    }),
-    'okx': ccxt.okx({
-        'apiKey': os.environ.get("OKX_API_KEY"),
-        'secret': os.environ.get("OKX_API_SECRET"),
-        'enableRateLimit': True
-    }),
-    'bingx': ccxt.bingx({'enableRateLimit': True}),
-    'kucoin': ccxt.kucoin({'enableRateLimit': True}),
-}
+    })
 
-DEFAULT_FEES = {
-    'binance': 0.1,
-    'kraken': 0.26,
-    'bybit': 0.075,
-    'okx': 0.1,
-    'bingx': 0.1,
-    'kucoin': 0.1,
-}
-
-def get_trading_fee(exchange_id: str, exchange: ccxt.Exchange) -> float:
     try:
-        if 'fetchTradingFees' in exchange.has and exchange.has['fetchTradingFees']:
-            fees = exchange.fetch_trading_fees()
-            return fees.get('taker', DEFAULT_FEES.get(exchange_id, 0.1))
-        return DEFAULT_FEES.get(exchange_id, 0.1)
+        binance.load_markets()
+        bybit.load_markets()
+
+        binance_tokens = set(binance.symbols)
+        bybit_tokens = set(bybit.symbols)
+
+        common = binance_tokens.intersection(bybit_tokens)
+        return list(common)[:20]  # Limit to 20 tokens to reduce API load
     except Exception as e:
-        logger.error(f"Fee error for {exchange_id}: {e}")
-        return DEFAULT_FEES.get(exchange_id, 0.1)
+        print(f"[ERROR] Failed to fetch common tokens: {e}")
+        return ["BTC/USDT"]
 
-def fetch_exchange_tokens() -> dict:
-    tokens = {}
-    for exchange_id, exchange in EXCHANGES.items():
-        try:
-            markets = exchange.load_markets()
-            tokens[exchange_id] = list(markets.keys())
-        except Exception as e:
-            logger.error(f"Market load failed for {exchange_id}: {e}")
-    return tokens
+# ===== Получение цены по паре =====
+def get_binance_price(symbol):
+    try:
+        ticker = binance_client.get_symbol_ticker(symbol=symbol.replace("/", ""))
+        price = float(ticker["price"])
+        print(f"[INFO] Binance {symbol} Price: {price}")
+        return price
+    except Exception as e:
+        print(f"[ERROR] Error fetching Binance price for {symbol}: {e}")
+        return 0.0
 
-def get_market_prices(token: str) -> dict:
-    prices = {}
-    with ThreadPoolExecutor() as executor:
-        futures = {executor.submit(ex.fetch_ticker, token): ex_id for ex_id, ex in EXCHANGES.items()}
-        for future in as_completed(futures):
-            ex_id = futures[future]
-            try:
-                ticker = future.result()
-                prices[ex_id] = ticker['last']
-            except Exception as e:
-                logger.warning(f"Price fetch failed for {token} on {ex_id}: {e}")
-    return prices
+def get_bybit_price(symbol):
+    try:
+        response = bybit_client.get_tickers(category="linear", symbol=symbol.replace("/", ""))
+        if "result" in response and response["result"]["list"]:
+            price = float(response["result"]["list"][0]["lastPrice"])
+            print(f"[INFO] Bybit {symbol} Price: {price}")
+            return price
+        else:
+            print("[ERROR] Invalid Bybit response", response)
+            return 0.0
+    except Exception as e:
+        print(f"[ERROR] Error fetching Bybit price for {symbol}: {e}")
+        return 0.0
 
-def analyze_arbitrage(prices: dict, token: str, fees: dict) -> dict:
-    if len(prices) < 0.3:
-        return None
-
-    sorted_exchanges = sorted(prices.items(), key=lambda x: x[1])
-    buy_ex, buy_price = sorted_exchanges[0]
-    sell_ex, sell_price = sorted_exchanges[-1]
-
-    buy_fee = fees.get(buy_ex, 0.1)
-    sell_fee = fees.get(sell_ex, 0.1)
-
-    buy_total = buy_price * (1 + buy_fee / 100)
-    sell_total = sell_price * (1 - sell_fee / 100)
-    profit_pct = ((sell_total - buy_total) / buy_total) * 100
-
-    if profit_pct > 1:
-        return {
-            'token': token,
-            'buy_exchange': buy_ex,
-            'sell_exchange': sell_ex,
-            'buy_price': round(buy_price, 4),
-            'sell_price': round(sell_price, 4),
-            'profit': round(profit_pct, 2)
-        }
-    return None
-
-def find_opportunities() -> list:
-    logger.info("Starting arbitrage scan...")
-    tokens = fetch_exchange_tokens()
-    common_tokens = set.intersection(*[set(tokens[ex]) for ex in EXCHANGES if ex in tokens])
-    fees = {ex_id: get_trading_fee(ex_id, ex) for ex_id, ex in EXCHANGES.items()}
-
-    opportunities = []
-    for token in common_tokens:
-        if len(opportunities) >= 10:
-            break
-        prices = get_market_prices(token)
-        result = analyze_arbitrage(prices, token, fees)
-        if result:
-            opportunities.append(result)
-        time.sleep(1)
-
-    return sorted(opportunities, key=lambda x: x['profit'], reverse=True)
-
-def format_opportunities(opportunities: list) -> str:
-    if not opportunities:
-        return "🔍 No profitable arbitrage opportunities found currently."
-
-    message = ["🚀 *Top Arbitrage Opportunities:* 🚀\n"]
-    for idx, opp in enumerate(opportunities, 1):
-        message.append(
-            f"{idx}. *{opp['token']}*\n"
-            f"   ▼ Buy on: {opp['buy_exchange']} (${opp['buy_price']})\n"
-            f"   ▲ Sell on: {opp['sell_exchange']} (${opp['sell_price']})\n"
-            f"   💰 Profit: {opp['profit']}%\n"
-            f"   ――――――――――――――――――――"
-        )
-
-    return "\n".join(message)
-
+# ===== Telegram Bot Command =====
 async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔄 Scanning exchanges... (This may take 20-30 seconds)")
-    try:
-        loop = asyncio.get_running_loop()
-        opportunities = await loop.run_in_executor(None, find_opportunities)
-        response = format_opportunities(opportunities)
-        await update.message.reply_text(response, parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Scan failed: {e}")
-        await update.message.reply_text("⚠️ Error during scan. Please try again later.")
+    tokens = fetch_common_tokens()
+    messages = []
+    for symbol in tokens:
+        binance_price = get_binance_price(symbol)
+        bybit_price = get_bybit_price(symbol)
 
+        if not binance_price or not bybit_price:
+            continue
+
+        diff = abs(binance_price - bybit_price)
+        if diff >= THRESHOLD:
+            msg = (
+                f"⚡️ Arbitrage Alert!\n"
+                f"{symbol}\n"
+                f"Binance: {binance_price}$\n"
+                f"Bybit: {bybit_price}$\n"
+                f"📈 Diff: {round(diff, 2)}$"
+            )
+            messages.append(msg)
+
+    if messages:
+        for msg in messages:
+            await update.message.reply_text(msg)
+    else:
+        await update.message.reply_text("🔍 No arbitrage opportunities above threshold.")
+
+# ===== Main App =====
 def main():
-    TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")  # <-- load token from env
-    application = Application.builder().token(TOKEN).build()
-    application.add_handler(CommandHandler("scan", scan_command))
-    logger.info("Bot is running...")
-    application.run_polling()
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("scan", scan_command))
+    print("[INFO] Telegram bot is running...")
+    app.run_polling()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
