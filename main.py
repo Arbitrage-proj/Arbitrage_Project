@@ -50,6 +50,8 @@ EXCHANGES = {
     }),
 }
 
+print(EXCHANGES['bybit']['apiKey'])
+
 DEFAULT_FEES = {
     'binance': 0.1,
     'kraken': 0.26,
