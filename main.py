@@ -2,9 +2,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import asyncio
 import ccxt
 import logging
-import os  # <-- Added
+import os
 import time
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 logging.basicConfig(
@@ -73,7 +73,7 @@ def get_market_prices(token: str) -> dict:
     return prices
 
 def analyze_arbitrage(prices: dict, token: str, fees: dict) -> dict:
-    if len(prices) < 0.3:
+    if len(prices) < 2:
         return None
 
     sorted_exchanges = sorted(prices.items(), key=lambda x: x[1])
@@ -144,7 +144,7 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Error during scan. Please try again later.")
 
 def main():
-    TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")  # <-- load token from env
+    TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("scan", scan_command))
     logger.info("Bot is running...")
