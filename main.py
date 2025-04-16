@@ -4,6 +4,7 @@ import ccxt
 import logging
 import os
 import time
+from bybit import Bybit
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -13,104 +14,116 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+DEFAULT_FEES = {
+    'binance': 0.1,
+    'bybit': 0.075,
+    'kraken': 0.26,
+    'okx': 0.1,
+    'bingx': 0.1,
+    'kucoin': 0.1,
+}
+
 EXCHANGES = {
     'binance': ccxt.binance({
         'enableRateLimit': True,
-        'options': {
-            'defaultType': 'spot',
-            'adjustForTimeDifference': True,
-        }
+        'options': {'defaultType': 'spot'}
     }),
-    'bybit': ccxt.bybit({
-        'apiKey': os.environ.get("BYBIT_API_KEY"),
-        'secret': os.environ.get("BYBIT_API_SECRET"),
-        'enableRateLimit': True,
-        'options': {
-            'defaultType': 'spot',
-            'recvWindow': 10000,
-        }
-    }),
-    'kraken': ccxt.kraken({
-        'enableRateLimit': True,
-        'timeout': 15000
-    }),
+    'kraken': ccxt.kraken({'enableRateLimit': True}),
     'okx': ccxt.okx({
         'apiKey': os.environ.get("OKX_API_KEY"),
         'secret': os.environ.get("OKX_API_SECRET"),
         'enableRateLimit': True,
         'options': {'defaultType': 'spot'}
     }),
-    'bingx': ccxt.bingx({
-        'enableRateLimit': True,
-        'timeout': 10000
-    }),
+    'bingx': ccxt.bingx({'enableRateLimit': True}),
     'kucoin': ccxt.kucoin({
         'enableRateLimit': True,
         'options': {'defaultType': 'spot'}
     }),
 }
 
-print(EXCHANGES['bybit']['apiKey'])
-
-DEFAULT_FEES = {
-    'binance': 0.1,
-    'kraken': 0.26,
-    'bybit': 0.075,
-    'okx': 0.1,
-    'bingx': 0.1,
-    'kucoin': 0.1,
-}
+BYBIT_CLIENT = Bybit(
+    api_key=os.environ.get("BYBIT_API_KEY"),
+    api_secret=os.environ.get("BYBIT_API_SECRET")
+)
 
 
-def get_trading_fee(exchange_id: str, exchange: ccxt.Exchange) -> float:
+def validate_env_keys():
+    """Validate required environment variables."""
+    required_keys = [
+        "OKX_API_KEY", "OKX_API_SECRET", "BYBIT_API_KEY", "BYBIT_API_SECRET", "TELEGRAM_BOT_TOKEN"
+    ]
+    missing_keys = [key for key in required_keys if not os.environ.get(key)]
+    if missing_keys:
+        logger.warning(f"Missing environment variables: {', '.join(missing_keys)}")
+    else:
+        logger.info("All required environment variables are set.")
+
+
+def get_bybit_symbols():
+    """Fetch active spot trading pairs from Bybit using their official SDK."""
     try:
-        if exchange.has.get('fetchTradingFees', False):
-            fees = exchange.fetch_trading_fees()
-            return fees.get('taker', DEFAULT_FEES[exchange_id])
-        return DEFAULT_FEES[exchange_id]
+        response = BYBIT_CLIENT.Market.market_symbolInfo().result()
+        symbols = []
+        for item in response[0]['result']:
+            if item['status'] == 'Trading' and item['quote_currency'] == 'USDT':
+                symbol = f"{item['base_currency']}/{item['quote_currency']}"
+                symbols.append(symbol)
+        return symbols
     except Exception as e:
-        logger.warning(f"Using default fee for {exchange_id}: {str(e)}")
-        return DEFAULT_FEES[exchange_id]
+        logger.error(f"Bybit symbol fetch error: {e}")
+        return []
 
 
 def fetch_exchange_tokens() -> dict:
+    """Fetch trading pairs from all exchanges."""
     tokens = {}
+
+    # Fetch Bybit symbols using official SDK
+    bybit_symbols = get_bybit_symbols()
+    tokens['bybit'] = bybit_symbols
+    logger.info(f"Loaded {len(bybit_symbols)} Bybit symbols")
+
+    # Fetch other exchanges using CCXT
     for exchange_id, exchange in EXCHANGES.items():
         try:
-            # Load markets with retry logic
-            markets = exchange.load_markets(reload=True)
-            valid_symbols = [s for s in markets if markets[s]['active'] and '/' in s]
+            markets = exchange.load_markets()
+            valid_symbols = [
+                s for s in markets
+                if markets[s]['active'] and '/' in s
+            ]
             tokens[exchange_id] = valid_symbols
             logger.info(f"Loaded {len(valid_symbols)} tokens from {exchange_id}")
-        except ccxt.NetworkError as e:
-            logger.error(f"Network error loading {exchange_id}: {str(e)}")
-        except ccxt.ExchangeError as e:
-            logger.error(f"Exchange error loading {exchange_id}: {str(e)}")
         except Exception as e:
-            logger.error(f"General error loading {exchange_id}: {str(e)}")
+            logger.error(f"Market load failed for {exchange_id}: {e}")
+
     return tokens
 
 
 def get_market_prices(token: str) -> dict:
+    """Get prices for a token across all exchanges."""
     prices = {}
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {}
+
+        # Add Bybit price fetch using CCXT
+        futures[executor.submit(
+            ccxt.bybit({'enableRateLimit': True}).fetch_ticker,
+            token
+        )] = 'bybit'
+
+        # Add other exchanges
         for ex_id, ex in EXCHANGES.items():
-            try:
-                futures[executor.submit(ex.fetch_ticker, token)] = ex_id
-            except Exception as e:
-                logger.warning(f"Failed to submit {ex_id}: {str(e)}")
+            futures[executor.submit(ex.fetch_ticker, token)] = ex_id
 
         for future in as_completed(futures):
             ex_id = futures[future]
             try:
                 ticker = future.result()
-                if ticker['last'] is not None:
-                    prices[ex_id] = ticker['last']
-            except ccxt.RateLimitExceeded:
-                logger.warning(f"Rate limit exceeded on {ex_id}")
+                prices[ex_id] = ticker['last']
             except Exception as e:
-                logger.warning(f"Price fetch failed on {ex_id}: {str(e)}")
+                logger.warning(f"Price fetch failed on {ex_id}: {e}")
+
     return prices
 
 
@@ -153,8 +166,6 @@ def find_opportunities() -> list:
     ])
     logger.info(f"Found {len(common_tokens)} common tokens across exchanges")
 
-    fees = {ex_id: get_trading_fee(ex_id, ex) for ex_id, ex in EXCHANGES.items()}
-
     opportunities = []
     max_tokens_to_check = 100  # Limit for testing
     checked_tokens = 0
@@ -164,7 +175,7 @@ def find_opportunities() -> list:
         for token in common_tokens:
             if checked_tokens >= max_tokens_to_check:
                 break
-            futures.append(executor.submit(process_token, token, fees))
+            futures.append(executor.submit(process_token, token))
             checked_tokens += 1
 
         for future in as_completed(futures):
@@ -175,10 +186,10 @@ def find_opportunities() -> list:
     return sorted(opportunities, key=lambda x: x['profit'], reverse=True)[:10]
 
 
-def process_token(token: str, fees: dict) -> dict:
+def process_token(token: str) -> dict:
     try:
         prices = get_market_prices(token)
-        return analyze_arbitrage(prices, token, fees)
+        return analyze_arbitrage(prices, token, DEFAULT_FEES)
     except Exception as e:
         logger.warning(f"Error processing {token}: {str(e)}")
     return None
@@ -213,6 +224,7 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+    validate_env_keys()
     TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN environment variable not set")

@@ -3,4 +3,4 @@ ccxt
 requests
 asyncio
 python-binance
-pybit
+bybit
