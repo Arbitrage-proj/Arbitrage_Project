@@ -4,7 +4,7 @@ import ccxt
 import logging
 import os
 import time
-from bybit import Bybit
+import bybit
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -42,7 +42,7 @@ EXCHANGES = {
     }),
 }
 
-BYBIT_CLIENT = Bybit(
+BYBIT_CLIENT = bybit.bybit(test=False,
     api_key=os.environ.get("BYBIT_API_KEY"),
     api_secret=os.environ.get("BYBIT_API_SECRET")
 )
