@@ -34,7 +34,6 @@ THRESHOLD = 0
 # ===== Получение общих торговых пар =====
 def fetch_common_tokens():
     exchanges = {
-        'binance': ccxt.binance({"enableRateLimit": True}),
         'bybit': ccxt.bybit({
             'apiKey': BYBIT_API_KEY,
             'secret': BYBIT_SECRET,
@@ -65,17 +64,30 @@ def fetch_common_tokens():
     }
 
     try:
+        # Try to add Binance if available
+        try:
+            exchanges['binance'] = ccxt.binance({"enableRateLimit": True})
+        except Exception as e:
+            print(f"[WARNING] Binance is not available: {e}")
+
         # Load markets for all exchanges
         for exchange in exchanges.values():
-            exchange.load_markets()
+            try:
+                exchange.load_markets()
+            except Exception as e:
+                print(f"[WARNING] Failed to load markets for {exchange.id}: {e}")
 
         # Get all symbols from each exchange
         all_symbols = {}
         for exchange_name, exchange in exchanges.items():
-            all_symbols[exchange_name] = set(exchange.symbols)
+            try:
+                all_symbols[exchange_name] = set(exchange.symbols)
+            except Exception as e:
+                print(f"[WARNING] Failed to get symbols for {exchange_name}: {e}")
+                all_symbols[exchange_name] = set()
 
         # Find common symbols across all exchanges
-        common = set.intersection(*all_symbols.values())
+        common = set.intersection(*[s for s in all_symbols.values() if s])  # Only use non-empty sets
         return list(common)[:20]  # Limit to 20 tokens to reduce API load
     except Exception as e:
         print(f"[ERROR] Failed to fetch common tokens: {e}")
@@ -89,7 +101,7 @@ def get_binance_price(symbol):
         print(f"[INFO] Binance {symbol} Price: {price}")
         return price
     except Exception as e:
-        print(f"[ERROR] Error fetching Binance price for {symbol}: {e}")
+        print(f"[WARNING] Binance is not available for {symbol}: {e}")
         return 0.0
 
 def get_bybit_price(symbol):
@@ -172,6 +184,15 @@ def get_bingx_price(symbol):
 async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tokens = fetch_common_tokens()
     messages = []
+    
+    # Add a warning message if Binance is not available
+    try:
+        binance_client.get_symbol_ticker(symbol="BTCUSDT")
+    except Exception as e:
+        await update.message.reply_text(
+            "⚠️ Note: Binance is not available in your region. "
+            "Prices will be compared across other exchanges only."
+        )
     
     for symbol in tokens:
         prices = {
