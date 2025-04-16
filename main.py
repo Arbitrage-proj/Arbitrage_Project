@@ -2,32 +2,40 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import asyncio
 import ccxt
 import logging
-import os  # <-- Added
+import os
 import time
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
+# Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
+# Configuration
+MIN_PROFIT_THRESHOLD = 1.0 
+MAX_TOKENS_TO_SCAN = 20
+REQUEST_TIMEOUT = 10
+
 EXCHANGES = {
-    'binance': ccxt.binance({'enableRateLimit': True}),
-    'kraken': ccxt.kraken({'enableRateLimit': True}),
+    'binance': ccxt.binance({'enableRateLimit': True, 'timeout': REQUEST_TIMEOUT * 1000}),
+    'kraken': ccxt.kraken({'enableRateLimit': True, 'timeout': REQUEST_TIMEOUT * 1000}),
     'bybit': ccxt.bybit({
         'apiKey': os.environ.get("BYBIT_API_KEY"),
         'secret': os.environ.get("BYBIT_API_SECRET"),
-        'enableRateLimit': True
+        'enableRateLimit': True,
+        'timeout': REQUEST_TIMEOUT * 1000
     }),
     'okx': ccxt.okx({
         'apiKey': os.environ.get("OKX_API_KEY"),
         'secret': os.environ.get("OKX_API_SECRET"),
-        'enableRateLimit': True
+        'enableRateLimit': True,
+        'timeout': REQUEST_TIMEOUT * 1000
     }),
-    'bingx': ccxt.bingx({'enableRateLimit': True}),
-    'kucoin': ccxt.kucoin({'enableRateLimit': True}),
+    'bingx': ccxt.bingx({'enableRateLimit': True, 'timeout': REQUEST_TIMEOUT * 1000}),
+    'kucoin': ccxt.kucoin({'enableRateLimit': True, 'timeout': REQUEST_TIMEOUT * 1000}),
 }
 
 DEFAULT_FEES = {
@@ -39,7 +47,17 @@ DEFAULT_FEES = {
     'kucoin': 0.1,
 }
 
+def check_exchange_status(exchange_id: str, exchange: ccxt.Exchange) -> bool:
+    """Check if an exchange is operational."""
+    try:
+        exchange.load_markets()
+        return True
+    except Exception as e:
+        logger.error(f"Exchange {exchange_id} is not available: {e}")
+        return False
+
 def get_trading_fee(exchange_id: str, exchange: ccxt.Exchange) -> float:
+    """Get trading fee for an exchange."""
     try:
         if 'fetchTradingFees' in exchange.has and exchange.has['fetchTradingFees']:
             fees = exchange.fetch_trading_fees()
@@ -50,16 +68,22 @@ def get_trading_fee(exchange_id: str, exchange: ccxt.Exchange) -> float:
         return DEFAULT_FEES.get(exchange_id, 0.1)
 
 def fetch_exchange_tokens() -> dict:
+    """Fetch available tokens from all exchanges."""
     tokens = {}
-    for exchange_id, exchange in EXCHANGES.items():
-        try:
-            markets = exchange.load_markets()
-            tokens[exchange_id] = list(markets.keys())
-        except Exception as e:
-            logger.error(f"Market load failed for {exchange_id}: {e}")
+    with ThreadPoolExecutor() as executor:
+        futures = {executor.submit(ex.load_markets): ex_id for ex_id, ex in EXCHANGES.items()}
+        for future in as_completed(futures):
+            ex_id = futures[future]
+            try:
+                markets = future.result()
+                tokens[ex_id] = list(markets.keys())
+                logger.info(f"Successfully loaded markets for {ex_id}")
+            except Exception as e:
+                logger.error(f"Market load failed for {ex_id}: {e}")
     return tokens
 
 def get_market_prices(token: str) -> dict:
+    """Fetch prices for a token from all exchanges in parallel."""
     prices = {}
     with ThreadPoolExecutor() as executor:
         futures = {executor.submit(ex.fetch_ticker, token): ex_id for ex_id, ex in EXCHANGES.items()}
@@ -67,13 +91,16 @@ def get_market_prices(token: str) -> dict:
             ex_id = futures[future]
             try:
                 ticker = future.result()
-                prices[ex_id] = ticker['last']
+                if ticker and 'last' in ticker and ticker['last']:
+                    prices[ex_id] = float(ticker['last'])
+                    logger.debug(f"Price for {token} on {ex_id}: {prices[ex_id]}")
             except Exception as e:
                 logger.warning(f"Price fetch failed for {token} on {ex_id}: {e}")
     return prices
 
 def analyze_arbitrage(prices: dict, token: str, fees: dict) -> dict:
-    if len(prices) < 0.3:
+    """Analyze arbitrage opportunities for a token."""
+    if len(prices) < 2:  # Need at least 2 valid prices
         return None
 
     sorted_exchanges = sorted(prices.items(), key=lambda x: x[1])
@@ -87,36 +114,46 @@ def analyze_arbitrage(prices: dict, token: str, fees: dict) -> dict:
     sell_total = sell_price * (1 - sell_fee / 100)
     profit_pct = ((sell_total - buy_total) / buy_total) * 100
 
-    if profit_pct > 1:
+    if profit_pct >= MIN_PROFIT_THRESHOLD:
         return {
             'token': token,
             'buy_exchange': buy_ex,
             'sell_exchange': sell_ex,
             'buy_price': round(buy_price, 4),
             'sell_price': round(sell_price, 4),
-            'profit': round(profit_pct, 2)
+            'profit': round(profit_pct, 2),
+            'volume': round((sell_price - buy_price) * 1000, 2)  # Volume for $1000 trade
         }
     return None
 
 def find_opportunities() -> list:
+    """Find arbitrage opportunities across all exchanges."""
     logger.info("Starting arbitrage scan...")
+    
+    # Check exchange status
+    operational_exchanges = {ex_id: ex for ex_id, ex in EXCHANGES.items() 
+                           if check_exchange_status(ex_id, ex)}
+    
+    if not operational_exchanges:
+        logger.error("No operational exchanges found")
+        return []
+
     tokens = fetch_exchange_tokens()
-    common_tokens = set.intersection(*[set(tokens[ex]) for ex in EXCHANGES if ex in tokens])
-    fees = {ex_id: get_trading_fee(ex_id, ex) for ex_id, ex in EXCHANGES.items()}
+    common_tokens = set.intersection(*[set(tokens[ex]) for ex in operational_exchanges if ex in tokens])
+    fees = {ex_id: get_trading_fee(ex_id, ex) for ex_id, ex in operational_exchanges.items()}
 
     opportunities = []
-    for token in common_tokens:
-        if len(opportunities) >= 10:
-            break
+    for token in list(common_tokens)[:MAX_TOKENS_TO_SCAN]:
         prices = get_market_prices(token)
         result = analyze_arbitrage(prices, token, fees)
         if result:
             opportunities.append(result)
-        time.sleep(1)
+        time.sleep(0.5)  # Rate limiting
 
     return sorted(opportunities, key=lambda x: x['profit'], reverse=True)
 
 def format_opportunities(opportunities: list) -> str:
+    """Format arbitrage opportunities into a readable message."""
     if not opportunities:
         return "🔍 No profitable arbitrage opportunities found currently."
 
@@ -127,12 +164,14 @@ def format_opportunities(opportunities: list) -> str:
             f"   ▼ Buy on: {opp['buy_exchange']} (${opp['buy_price']})\n"
             f"   ▲ Sell on: {opp['sell_exchange']} (${opp['sell_price']})\n"
             f"   💰 Profit: {opp['profit']}%\n"
+            f"   📊 Volume: ${opp['volume']} (per $1000)\n"
             f"   ――――――――――――――――――――"
         )
 
     return "\n".join(message)
 
 async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /scan command."""
     await update.message.reply_text("🔄 Scanning exchanges... (This may take 20-30 seconds)")
     try:
         loop = asyncio.get_running_loop()
@@ -144,7 +183,12 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Error during scan. Please try again later.")
 
 def main():
-    TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")  # <-- load token from env
+    """Start the Telegram bot."""
+    TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN not found in environment variables")
+        return
+
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("scan", scan_command))
     logger.info("Bot is running...")
