@@ -1,6 +1,8 @@
-python-telegram-bot==20.7
-ccxt
+python-telegram-bot~=21.11.1
+ccxt~=4.4.75
 requests
 asyncio
 python-binance
 bybit
+binance~=0.3.5
+pybit~=5.10.1
