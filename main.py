@@ -21,7 +21,7 @@ bybit = BybitClient(api_key="MddybceGH9RuPrmk2s", api_secret="i3yrlXj5TX4TKXZpER
 
 EXCHANGES = {
     'kraken': ccxt.kraken({'enableRateLimit': True}),
-    'okx': ccxt.okx({'enableRateLimit': True}),
+    #'okx': ccxt.okx({'enableRateLimit': True}),
     'bingx': ccxt.bingx({
         'enableRateLimit': True,
         'api_key': "o1Vh3Mxd00FslQnRRqENgxEf9rAShOsUDynNQDlCce2jWpGsStLocO2QxWXe4ICRKyOgRZxp12mKsWSCUZ5lQ",
