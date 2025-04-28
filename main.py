@@ -2,6 +2,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import asyncio
 import logging
 import time
+import requests
+import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes
 from binance.client import Client as BinanceClient
@@ -20,13 +22,12 @@ binance = BinanceClient("your_binance_api_key", "your_binance_api_secret")
 bybit = BybitClient(api_key="MddybceGH9RuPrmk2s", api_secret="i3yrlXj5TX4TKXZpERUMMs8R4yLjoaTV78MV")
 
 EXCHANGES = {
-    'kraken': ccxt.kraken({'enableRateLimit': True}),
-    #'okx': ccxt.okx({'enableRateLimit': True}),
-    'bingx': ccxt.bingx({
-        'enableRateLimit': True,
-        'api_key': "o1Vh3Mxd00FslQnRRqENgxEf9rAShOsUDynNQDlCce2jWpGsStLocO2QxWXe4ICRKyOgRZxp12mKsWSCUZ5lQ",
-        'api_secret': "jxCELMjmLWGpDtax22XFdxaPGXrDyJ6LfKd7lZCClfIU0fJlix8Y7ngoSvmvuhAfzCY5VUzmZGIFxrYKJVg",
+    'okx': ccxt.okx({
+        'apiKey': os.environ.get("OKX_API_KEY"),
+        'secret': os.environ.get("OKX_API_SECRET"),
+        'enableRateLimit': True
     }),
+    'bingx': ccxt.bingx({'enableRateLimit': True}),
     'kucoin': ccxt.kucoin({'enableRateLimit': True}),
 }
 
@@ -41,11 +42,7 @@ DEFAULT_FEES = {
 
 
 def get_trading_fee(exchange_id: str, exchange: ccxt.Exchange = None) -> float:
-    try:
-        return DEFAULT_FEES.get(exchange_id, 0.1)
-    except Exception as e:
-        logger.error(f"Fee error for {exchange_id}: {e}")
-        return DEFAULT_FEES.get(exchange_id, 0.1)
+    return DEFAULT_FEES.get(exchange_id, 0.1)
 
 
 def fetch_binance_tokens():
@@ -65,14 +62,46 @@ def fetch_binance_tokens():
 def fetch_bybit_tokens():
     try:
         response = bybit.get_tickers(category="spot")
-        pairs = [
-            f"{item['symbol'].replace('USDT', '')}/USDT"
-            for item in response["result"]["list"]
-            if item["symbol"].endswith("USDT")
-        ]
+        pairs = []
+        for item in response["result"]["list"]:
+            symbol = item["symbol"]
+            if symbol.endswith("USDT"):
+                base = symbol[:-4]
+                quote = symbol[-4:]
+                pairs.append(f"{base}/{quote}")
         return pairs
     except Exception as e:
         logger.error(f"Failed to fetch Bybit tokens: {e}")
+        return []
+
+
+def fetch_kraken_tokens():
+    try:
+        url = "https://api.kraken.com/0/public/AssetPairs"
+        response = requests.get(url)
+        data = response.json()
+        pairs = data.get('result', {})
+        tokens = []
+        for v in pairs.values():
+            wsname = v.get('wsname')
+            if wsname and wsname.endswith('/USDT'):
+                base, quote = wsname.split('/')
+                if base == 'XBT':
+                    base = 'BTC'
+                tokens.append(f"{base}/{quote}")
+        return tokens
+    except Exception as e:
+        logger.error(f"Failed to fetch Kraken tokens via API: {e}")
+        return []
+
+
+def fetch_okx_tokens():
+    try:
+        okx = EXCHANGES['okx']
+        markets = okx.load_markets()
+        return [symbol for symbol in markets if symbol.endswith('/USDT')]
+    except Exception as e:
+        logger.error(f"Failed to fetch OKX tokens: {e}")
         return []
 
 
@@ -80,12 +109,16 @@ def fetch_exchange_tokens() -> dict:
     tokens = {
         'binance': fetch_binance_tokens(),
         'bybit': fetch_bybit_tokens(),
+        'kraken': fetch_kraken_tokens(),
+        'okx': fetch_okx_tokens(),
     }
 
     for exchange_id, exchange in EXCHANGES.items():
+        if exchange_id in tokens:
+            continue  # Already fetched above
         try:
             markets = exchange.load_markets()
-            tokens[exchange_id] = list(markets.keys())
+            tokens[exchange_id] = [symbol for symbol in markets if symbol.endswith('/USDT')]
         except Exception as e:
             logger.error(f"Market load failed for {exchange_id}: {e}")
     return tokens
@@ -100,23 +133,19 @@ def get_market_prices(token: str) -> dict:
     with ThreadPoolExecutor() as executor:
         futures = {}
 
-        # Bybit
         if quote == "USDT":
             futures[executor.submit(
                 lambda: float(
-                    bybit.get_tickers(category="spot", symbol=symbol_noslash)["result"]["list"][0]["lastPrice"])
+                    bybit.get_tickers(category="spot", symbol=symbol_noslash)["result"]["list"][0]["lastPrice"]
+                )
             )] = 'bybit'
 
-        # Binance
         futures[executor.submit(
             lambda: float(binance.get_symbol_ticker(symbol=symbol_noslash)["price"])
         )] = 'binance'
 
-        # CCXT exchanges
-        futures.update({
-            executor.submit(ex.fetch_ticker, token): ex_id
-            for ex_id, ex in EXCHANGES.items()
-        })
+        for ex_id, ex in EXCHANGES.items():
+            futures[executor.submit(ex.fetch_ticker, token)] = ex_id
 
         for future in as_completed(futures):
             ex_id = futures[future]
@@ -125,6 +154,15 @@ def get_market_prices(token: str) -> dict:
                 prices[ex_id] = result if isinstance(result, float) else result['last']
             except Exception as e:
                 logger.warning(f"Price fetch failed for {token} on {ex_id}: {e}")
+
+    # Kraken via direct API
+    try:
+        response = requests.get("https://api.kraken.com/0/public/Ticker", params={"pair": symbol_noslash})
+        data = response.json()
+        result = list(data["result"].values())[0]
+        prices['kraken'] = float(result["c"][0])
+    except Exception as e:
+        logger.warning(f"Price fetch failed for {token} on Kraken: {e}")
 
     return prices
 
@@ -144,7 +182,7 @@ def analyze_arbitrage(prices: dict, token: str, fees: dict) -> dict:
     sell_total = sell_price * (1 - sell_fee / 100)
     profit_pct = ((sell_total - buy_total) / buy_total) * 100
 
-    if profit_pct > 1:
+    if profit_pct > 0.1:
         return {
             'token': token,
             'buy_exchange': buy_ex,
@@ -159,25 +197,42 @@ def analyze_arbitrage(prices: dict, token: str, fees: dict) -> dict:
 def find_opportunities() -> list:
     logger.info("Starting arbitrage scan...")
     tokens = fetch_exchange_tokens()
+    logger.info(f"Fetched tokens for exchanges: { {ex: len(tokens[ex]) for ex in tokens} }")
     exchanges = list(tokens.keys())
-    common_tokens = set.intersection(*[set(tokens[ex]) for ex in exchanges])
+    logger.info(f"Exchanges considered for intersection: {exchanges}")
+    try:
+        common_tokens = set.intersection(*[set(tokens[ex]) for ex in exchanges])
+    except Exception as e:
+        logger.error(f"Error finding common tokens: {e}")
+        return []
+    logger.info(f"Number of common tokens: {len(common_tokens)}")
     fees = {ex_id: get_trading_fee(ex_id, EXCHANGES.get(ex_id)) for ex_id in exchanges}
 
     opportunities = []
     for token in common_tokens:
         if len(opportunities) >= 10:
             break
-        prices = get_market_prices(token)
-        result = analyze_arbitrage(prices, token, fees)
-        if result:
-            opportunities.append(result)
+        logger.info(f"Checking arbitrage for token: {token}")
+        try:
+            prices = get_market_prices(token)
+            logger.info(f"Prices for {token}: {prices}")
+            result = analyze_arbitrage(prices, token, fees)
+            if result:
+                logger.info(f"Arbitrage opportunity found: {result}")
+                opportunities.append(result)
+        except Exception as e:
+            logger.error(f"Error processing token {token}: {e}")
         time.sleep(0.5)
 
+    logger.info(f"Total opportunities found: {len(opportunities)}")
+    if opportunities:
+        max_opp = max(opportunities, key=lambda x: x['profit'])
+        logger.info(f"Max profit: {max_opp['profit']}% for {max_opp['token']} (buy on {max_opp['buy_exchange']}, sell on {max_opp['sell_exchange']})")
     return sorted(opportunities, key=lambda x: x['profit'], reverse=True)
 
 
 EXCHANGE_URLS = {
-    'binance': "https://www.binance.com/en/trade/{}USDT",
+    'binance': "https://www.binance.com/en/trade/{}_USDT?type=spot",
     'kraken': "https://trade.kraken.com/markets/{}-USDT",
     'bybit': "https://www.bybit.com/trade/spot/{}USDT",
     'okx': "https://www.okx.com/trade-spot/{}-USDT",
@@ -187,7 +242,6 @@ EXCHANGE_URLS = {
 
 
 def format_opportunities(opportunities: list) -> str:
-    """Format results into a readable message with trading links"""
     if not opportunities:
         return "🔍 No profitable arbitrage opportunities found currently."
 
@@ -208,9 +262,7 @@ def format_opportunities(opportunities: list) -> str:
 
 
 def get_default_keyboard() -> ReplyKeyboardMarkup:
-    """Return a default reply keyboard markup with common commands."""
-    keyboard = [['/scan', '/help']]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    return ReplyKeyboardMarkup([['/scan', '/help']], resize_keyboard=True)
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -225,7 +277,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- Binance\n"
         "- Kraken\n"
         "- ByBit\n"
-        "- OKX\n"
         "- BingX\n"
         "- KuCoin\n"
     )
@@ -233,15 +284,33 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔄 Scanning exchanges... (This may take 20–30 seconds)")
+    await update.message.reply_text("🔄 Scanning for arbitrage opportunities...")
     try:
         loop = asyncio.get_running_loop()
         opportunities = await loop.run_in_executor(None, find_opportunities)
         response = format_opportunities(opportunities)
         await update.message.reply_text(response, parse_mode='Markdown')
     except Exception as e:
-        logger.error(f"Scan failed: {e}")
-        await update.message.reply_text("⚠️ Error during scan. Please try again later.")
+        logger.error(f"Failed to scan for opportunities: {e}")
+        await update.message.reply_text("⚠️ Error scanning for opportunities. Please try again later.")
+
+
+def fetch_okx_tickers():
+    """
+    Fetch all OKX spot tickers and their last prices.
+    Returns a list of dicts: [{'instId': 'BTC-USDT', 'last': 'price'}, ...]
+    """
+    url = 'https://www.okx.com/api/v5/market/tickers?instType=SPOT'
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json().get('data', [])
+        # Each item in data is a dict with keys like 'instId', 'last', etc.
+        tickers = [{'instId': item['instId'], 'last': item['last']} for item in data]
+        return tickers
+    except Exception as e:
+        logger.error(f"Failed to fetch OKX tickers: {e}")
+        return []
 
 
 def main():

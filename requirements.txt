@@ -6,3 +6,7 @@ python-binance
 bybit
 binance~=0.3.5
 pybit~=5.10.1
+api_key="MddybceGH9RuPrmk2s", api_secret="i3yrlXj5TX4TKXZpERUMMs8R4yLjoaTV78MV"
+'api_key': "o1Vh3Mxd00FslQnRRqENgxEf9rAShOsUDynNQDlCce2jWpGsStLocO2QxWXe4ICRKyOgRZxp12mKsWSCUZ5lQ",
+        'api_secret': "jxCELMjmLWGpDtax22XFdxaPGXrDyJ6LfKd7lZCClfIU0fJlix8Y7ngoSvmvuhAfzCY5VUzmZGIFxrYKJVg",
+        '8033159498:AAHX9srehZoT2M8e2AabLuO_w2FVKOCv_b0'
