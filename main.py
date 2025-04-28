@@ -187,8 +187,8 @@ def analyze_arbitrage(prices: dict, token: str, fees: dict) -> dict:
             'token': token,
             'buy_exchange': buy_ex,
             'sell_exchange': sell_ex,
-            'buy_price': round(buy_price, 4),
-            'sell_price': round(sell_price, 4),
+            'buy_price': buy_price,
+            'sell_price': sell_price,
             'profit': round(profit_pct, 2)
         }
     return None
@@ -231,14 +231,22 @@ def find_opportunities() -> list:
     return sorted(opportunities, key=lambda x: x['profit'], reverse=True)
 
 
-EXCHANGE_URLS = {
-    'binance': "https://www.binance.com/en/trade/{}_USDT?type=spot",
-    'kraken': "https://trade.kraken.com/markets/{}-USDT",
-    'bybit': "https://www.bybit.com/trade/spot/{}USDT",
-    'okx': "https://www.okx.com/trade-spot/{}-USDT",
-    'bingx': "https://www.bingx.com/en-us/trade/{}/USDT",
-    'kucoin': "https://www.kucoin.com/trade/{}-USDT"
-}
+def get_exchange_url(exchange, token):
+    base, quote = token.split('/')
+    if exchange == 'binance':
+        return f"https://www.binance.com/en/trade/{base}_{quote}?type=spot"
+    elif exchange == 'kraken':
+        return f"https://trade.kraken.com/markets/{base}-{quote}"
+    elif exchange == 'bybit':
+        return f"https://www.bybit.com/trade/spot/{base}{quote}"
+    elif exchange == 'okx':
+        return f"https://www.okx.com/trade-spot/{base}-{quote}"
+    elif exchange == 'bingx':
+        return f"https://bingx.com/en/spot/{base}{quote}/"
+    elif exchange == 'kucoin':
+        return f"https://www.kucoin.com/trade/{base}-{quote}"
+    else:
+        return ""
 
 
 def format_opportunities(opportunities: list) -> str:
@@ -247,8 +255,8 @@ def format_opportunities(opportunities: list) -> str:
 
     message = ["🚀 *Top Arbitrage Opportunities:* 🚀\n"]
     for idx, opp in enumerate(opportunities, 1):
-        buy_link = EXCHANGE_URLS.get(opp['buy_exchange'], "").format(opp['token'])
-        sell_link = EXCHANGE_URLS.get(opp['sell_exchange'], "").format(opp['token'])
+        buy_link = get_exchange_url(opp['buy_exchange'], opp['token'])
+        sell_link = get_exchange_url(opp['sell_exchange'], opp['token'])
 
         message.append(
             f"{idx}. *{opp['token']}*\n"
