@@ -238,7 +238,7 @@ def get_exchange_url(exchange, token):
     elif exchange == 'kraken':
         return f"https://trade.kraken.com/markets/{base}-{quote}"
     elif exchange == 'bybit':
-        return f"https://www.bybit.com/trade/spot/{base}{quote}"
+        return f"https://www.bybit.com/trade/spot/{base}/{quote}"
     elif exchange == 'okx':
         return f"https://www.okx.com/trade-spot/{base}-{quote}"
     elif exchange == 'bingx':
