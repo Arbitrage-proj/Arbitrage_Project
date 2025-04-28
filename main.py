@@ -97,9 +97,10 @@ def fetch_kraken_tokens():
 
 def fetch_okx_tokens():
     try:
-        okx = EXCHANGES['okx']
-        markets = okx.load_markets()
-        return [symbol for symbol in markets if symbol.endswith('/USDT')]
+        url = 'https://www.okx.com/api/v5/market/tickers?instType=SPOT'
+        response = requests.get(url)
+        data = response.json()
+        return [item['instId'].replace('-', '/') for item in data['data'] if item['instId'].endswith('USDT')]
     except Exception as e:
         logger.error(f"Failed to fetch OKX tokens: {e}")
         return []
@@ -112,10 +113,9 @@ def fetch_exchange_tokens() -> dict:
         'kraken': fetch_kraken_tokens(),
         'okx': fetch_okx_tokens(),
     }
-
     for exchange_id, exchange in EXCHANGES.items():
-        if exchange_id in tokens:
-            continue  # Already fetched above
+        if exchange_id in tokens or exchange_id == 'okx':
+            continue  # Already fetched above or handled by REST
         try:
             markets = exchange.load_markets()
             tokens[exchange_id] = [symbol for symbol in markets if symbol.endswith('/USDT')]
@@ -126,9 +126,9 @@ def fetch_exchange_tokens() -> dict:
 
 def get_market_prices(token: str) -> dict:
     prices = {}
-
     base, quote = token.split('/')
     symbol_noslash = f"{base}{quote}"
+    symbol_dash = f"{base}-{quote}"
 
     with ThreadPoolExecutor() as executor:
         futures = {}
@@ -163,6 +163,16 @@ def get_market_prices(token: str) -> dict:
         prices['kraken'] = float(result["c"][0])
     except Exception as e:
         logger.warning(f"Price fetch failed for {token} on Kraken: {e}")
+
+    # OKX via REST API
+    try:
+        url = f'https://www.okx.com/api/v5/market/ticker?instId={symbol_dash}'
+        response = requests.get(url)
+        data = response.json()
+        if 'data' in data and data['data']:
+            prices['okx'] = float(data['data'][0]['last'])
+    except Exception as e:
+        logger.warning(f"Price fetch failed for {token} on okx: {e}")
 
     return prices
 
